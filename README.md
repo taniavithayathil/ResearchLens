@@ -1,4 +1,4 @@
-# ResearchLens — AI-Assisted Research Gap Discovery and Recommendation System
+# ResearchLens — Research Gap Discovery and Recommendation System
 
 ResearchLens is a production-grade research analytics platform designed to construct a structured representation of academic landscapes and identify potentially underexplored research areas using multiple evidence signals.
 
