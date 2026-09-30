@@ -1,0 +1,110 @@
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from database import engine, Base
+from sqlalchemy import inspect, text
+import models  # noqa: F401 – side-effect: registers all ORM classes with Base
+from api import router as api_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create all DB tables on startup (idempotent)."""
+    try:
+        Base.metadata.create_all(bind=engine)
+        # create_all does not add columns to an existing table.
+        existing_columns = {
+            column["name"] for column in inspect(engine).get_columns("analyses")
+        }
+        column_definitions = {
+            "stage": "VARCHAR(50) DEFAULT 'queued'",
+            "error_message": "TEXT",
+            "failed_stage": "VARCHAR(50)",
+        }
+        with engine.begin() as connection:
+            for column_name, definition in column_definitions.items():
+                if column_name not in existing_columns:
+                    connection.execute(
+                        text(
+                            f'ALTER TABLE analyses ADD COLUMN "{column_name}" {definition}'
+                        )
+                    )
+            if engine.dialect.name == "postgresql":
+                connection.execute(text(
+                    "ALTER TABLE paper_authors DROP CONSTRAINT IF EXISTS paper_authors_paper_id_fkey"
+                ))
+                connection.execute(text(
+                    "ALTER TABLE paper_authors ADD CONSTRAINT paper_authors_paper_id_fkey "
+                    "FOREIGN KEY (paper_id) REFERENCES research_papers (id) ON DELETE CASCADE"
+                ))
+                connection.execute(text(
+                    "ALTER TABLE paper_topics DROP CONSTRAINT IF EXISTS paper_topics_paper_id_fkey"
+                ))
+                connection.execute(text(
+                    "ALTER TABLE paper_topics ADD CONSTRAINT paper_topics_paper_id_fkey "
+                    "FOREIGN KEY (paper_id) REFERENCES research_papers (id) ON DELETE CASCADE"
+                ))
+        print("[DATABASE] Schema verified — all tables exist.")
+    except Exception as exc:
+        print(f"[DATABASE ERROR] Could not create schema on startup: {exc}")
+    yield
+
+
+app = FastAPI(
+    title="ResearchLens API",
+    description="AI-Assisted Research Gap Discovery and Recommendation System",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# ---------------------------------------------------------------------------
+# Global exception handler — return JSON instead of plain-text 500 HTML so
+# the frontend can always parse the error body.
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={"error": "Invalid request body.", "details": str(exc.errors())},
+    )
+
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router.router, prefix="/api/research", tags=["research"])
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
